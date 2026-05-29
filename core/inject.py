@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import openpyxl
+from openpyxl.cell.cell import MergedCell
 from openpyxl.utils import get_column_letter
 
 # 기준 시트 이름 (원본 파일에 끝에 공백 있음)
@@ -40,11 +41,38 @@ def inject_base_values(
 
 
 def _clear_sheet_data(ws) -> None:
-    """시트의 모든 셀 값을 지움 (병합/서식은 유지)."""
-    # 병합 해제 → 값 클리어 → 재병합. 여기선 값만 지우므로 병합은 그대로 둠.
+    """시트의 모든 셀 값을 지움.
+
+    병합 셀(MergedCell)은 직접 value 할당이 불가하므로,
+    먼저 모든 병합을 해제한 뒤 값을 지운다.
+    입력용 시트는 데이터로 채워질 예정이므로 병합은 복구하지 않는다.
+    """
+    # 1) 모든 병합 해제
+    for merged_range in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(merged_range))
+    # 2) 값 클리어 (이제 MergedCell이 없으므로 안전)
     for row in ws.iter_rows():
         for cell in row:
+            if isinstance(cell, MergedCell):
+                continue
             cell.value = None
+
+
+def _safe_set_cell(ws, row: int, column: int, value) -> None:
+    """병합 셀이 있어도 안전하게 값 설정.
+
+    target 셀이 MergedCell이면 그 셀이 속한 병합 범위를 풀고 다시 시도한다.
+    """
+    cell = ws.cell(row=row, column=column)
+    if isinstance(cell, MergedCell):
+        # 이 셀이 속한 병합 범위를 찾아 해제
+        for mr in list(ws.merged_cells.ranges):
+            if (mr.min_row <= row <= mr.max_row
+                    and mr.min_col <= column <= mr.max_col):
+                ws.unmerge_cells(str(mr))
+                break
+        cell = ws.cell(row=row, column=column)
+    cell.value = value
 
 
 def inject_uploaded_excel(
@@ -71,14 +99,14 @@ def inject_uploaded_excel(
     # 기존 값 클리어
     _clear_sheet_data(target_ws)
 
-    # 값 복사
+    # 값 복사 (병합 셀 있어도 안전하게)
     max_row = src_ws_vals.max_row or 0
     max_col = src_ws_vals.max_column or 0
     for r in range(1, max_row + 1):
         for c in range(1, max_col + 1):
             v = src_ws_vals.cell(row=r, column=c).value
             if v is not None:
-                target_ws.cell(row=r, column=c, value=v)
+                _safe_set_cell(target_ws, r, c, v)
 
 
 def populate_workbook(
